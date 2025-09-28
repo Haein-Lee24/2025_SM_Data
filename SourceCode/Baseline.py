@@ -1,85 +1,114 @@
-# -*- coding: utf-8 -*-
-# Baseline.py — CSV 기반 '부족 역량' 추천 (결측치 없는 버전)
+# Baseline.py (경로 문제 해결 최종 버전)
 
 import os
+import sys
 import pandas as pd
-from baseline_recommender import score_programs_for_student
 
-# [1] 경로 설정
-ROOT = os.path.dirname(__file__)
-DATA_DIR = os.path.join(ROOT, "..","Data")
-OUT_DIR  = os.path.join(ROOT,".." "Output")
-os.makedirs(OUT_DIR, exist_ok=True)
+# 'baseline_recommender.py' 파일이 같은 폴더에 있다고 가정합니다.
+# 만약 다른 곳에 있다면 이 부분을 수정해야 할 수 있습니다.
+try:
+    from baseline_recommender import generate_recommendations_for_student
+except ImportError:
+    print("❌ 치명적 오류: 'baseline_recommender.py' 파일을 찾을 수 없습니다.")
+    print("   해결책: 'Baseline.py'와 'baseline_recommender.py'가 같은 폴더에 있는지 확인해주세요.")
+    sys.exit()
 
-# CSV 파일 경로
+# --- [1] 기본 설정 ---
+# [해결책] __file__을 사용해 현재 스크립트 파일의 절대 경로를 기준으로 폴더 경로를 설정합니다.
+# 이렇게 하면 어떤 위치에서 실행해도 경로가 꼬이지 않습니다.
+try:
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    # Jupyter Notebook 등 __file__이 없는 환경을 위한 예외 처리
+    ROOT = os.getcwd()
+
+# 안전하게 상위 폴더로 이동하여 Data, Output 폴더 경로를 만듭니다.
+DATA_DIR = os.path.join(ROOT, "..", "Data")
+OUT_DIR = os.path.join(ROOT, "..", "Output")
+
+# Output 폴더가 없으면 생성
+if not os.path.exists(OUT_DIR):
+    print(f"INFO: Output 폴더가 존재하지 않아 새로 생성합니다: {OUT_DIR}")
+    os.makedirs(OUT_DIR)
+
+# 최종 CSV 파일 경로
 PROGRAMS_CSV = os.path.join(DATA_DIR, "program_remove.csv")
-HISTORY_CSV  = os.path.join(DATA_DIR, "student_remove.csv")
+HISTORY_CSV = os.path.join(DATA_DIR, "student_remove.csv")
 
-# [2] CSV 읽기 (결측치 없는 파일이라고 가정)
-programs_df = pd.read_csv(PROGRAMS_CSV, encoding="utf-8-sig")
-history_df  = pd.read_csv(HISTORY_CSV,  encoding="utf-8-sig")
-
-# [3] 추천 실행 모드
-STUDENT_ID = None      # 단일 학생 테스트: "0448919-9983430"
+# 추천 관련 파라미터
 TOP_K = 15
-USE_TARGET_GAP = False # True → 목표치 기반, False → 평균 대비 부족 가중치
-TARGET_PER_COMP = 5.0  # 목표치 기반일 때 사용
+TARGET_PER_COMP = 5.0
 
-# [4] 추천 실행
-if STUDENT_ID:
-    # 단일 학생 추천
-    recs = score_programs_for_student(
-        programs_df=programs_df,
-        history_df=history_df,
-        student_id=str(STUDENT_ID),
-        top_k=TOP_K,
-        use_target_gap=USE_TARGET_GAP,
-        target_per_comp=TARGET_PER_COMP
-    )
-    out_csv  = os.path.join(OUT_DIR, f"추천결과_{STUDENT_ID}_top{TOP_K}.csv")
-    out_xlsx = os.path.join(OUT_DIR, f"추천결과_{STUDENT_ID}_top{TOP_K}.xlsx")
-    recs.to_csv(out_csv, index=False, encoding="utf-8-sig")
-    recs.to_excel(out_xlsx, index=False)
-    print(f"[저장] {out_csv}")
-    print(f"[저장] {out_xlsx}")
+# --- [2] 데이터 로딩 ---
+print("--- [1/4] 데이터 로딩 시작 ---")
+try:
+    if not os.path.exists(PROGRAMS_CSV):
+        raise FileNotFoundError(f"프로그램 파일을 찾을 수 없습니다: {PROGRAMS_CSV}")
+    if not os.path.exists(HISTORY_CSV):
+        raise FileNotFoundError(f"이수내역 파일을 찾을 수 없습니다: {HISTORY_CSV}")
+        
+    programs_df = pd.read_csv(PROGRAMS_CSV, encoding='utf-8-sig')
+    history_df = pd.read_csv(HISTORY_CSV, encoding='utf-8-sig')
+    print(f"✅ 프로그램 데이터 ({len(programs_df)} 행) 및 이수내역 데이터 ({len(history_df)} 행) 로딩 성공.")
 
+except Exception as e:
+    print(f"❌ 치명적 오류: 파일을 읽는 중 문제가 발생했습니다.")
+    print(f"   오류 내용: {e}")
+    sys.exit()
+
+# --- [3] 전체 학생 대상 추천 실행 ---
+print("\n--- [2/4] 전체 학생 추천 생성 시작 ---")
+
+student_id_col_candidates = ["학생ID", "학번", "이수자ID", "Student", "student"]
+student_id_col = next((c for c in history_df.columns if any(key in str(c).strip() for key in student_id_col_candidates)), None)
+
+if student_id_col is None:
+    print("❌ 치명적 오류: 이수내역 데이터(student_remove.csv)에서 학생 ID 컬럼을 찾을 수 없습니다.")
+    sys.exit()
 else:
-    # 전체 학생 추천
-    student_id_col_candidates = ["학생ID", "학번", "이수자ID", "Student", "student"]
-    student_id_col = None
-    for c in history_df.columns:
-        if any(key in str(c) for key in student_id_col_candidates):
-            student_id_col = c
-            break
-    if student_id_col is None:
-        raise ValueError("학생ID 컬럼을 찾지 못했습니다.")
+    print(f"INFO: 학생 ID로 사용할 컬럼을 찾았습니다: '{student_id_col}'")
 
-    all_ids = history_df[student_id_col].astype(str).unique().tolist()
+all_student_ids = history_df[student_id_col].astype(str).unique().tolist()
+all_results = []
+total_students = len(all_student_ids)
 
-    results = []
-    for sid in all_ids:
+if total_students == 0:
+    print("⚠️ 경고: 처리할 학생 데이터가 없습니다.")
+else:
+    print(f"INFO: 총 {total_students} 명의 학생에 대한 추천을 시작합니다.")
+    for i, sid in enumerate(all_student_ids):
         try:
-            recs_sid = score_programs_for_student(
-                programs_df=programs_df,
-                history_df=history_df,
-                student_id=str(sid),
-                top_k=TOP_K,
-                use_target_gap=USE_TARGET_GAP,
-                target_per_comp=TARGET_PER_COMP
-            ).copy()
-            recs_sid.insert(0, "학생ID", sid)
-            recs_sid.insert(1, "rank", range(1, len(recs_sid)+1))
-            results.append(recs_sid)
-        except Exception as e:
-            print(f"[경고] 학생 {sid} 처리 실패: {e}")
+            recs_sid = generate_recommendations_for_student(
+                programs_df=programs_df, history_df=history_df, student_id=str(sid),
+                top_k=TOP_K, target_per_comp=TARGET_PER_COMP
+            )
+            
+            if not recs_sid.empty:
+                recs_sid.insert(0, "추천대상ID", sid)
+                recs_sid['추천순위'] = recs_sid.groupby('추천방식').cumcount() + 1
+                all_results.append(recs_sid)
+                
+            if (i + 1) % 10 == 0 or (i + 1) == total_students:
+                 print(f"  - 진행률: {i+1}/{total_students} ({((i+1)/total_students)*100:.1f}%)")
 
-    if results:
-        all_recs = pd.concat(results, ignore_index=True)
-        out_csv  = os.path.join(OUT_DIR, f"추천결과_전체학생_top{TOP_K}.csv")
-        out_xlsx = os.path.join(OUT_DIR, f"추천결과_전체학생_top{TOP_K}.xlsx")
-        all_recs.to_csv(out_csv, index=False, encoding="utf-8-sig")
-        all_recs.to_excel(out_xlsx, index=False)
-        print(f"[저장] {out_csv}")
-        print(f"[저장] {out_xlsx}")
-    else:
-        print("[정보] 추천 결과 없음. 입력 데이터 확인 필요.")
+        except Exception as e:
+            print(f"  - ⚠️ 학생 {sid} 처리 중 개별 오류 발생: {e}")
+
+# --- [4] 최종 결과 저장 ---
+print("\n--- [3/4] 최종 결과 파일 저장 시작 ---")
+if all_results:
+    final_df = pd.concat(all_results, ignore_index=True)
+    out_csv = os.path.join(OUT_DIR, f"추천결과_전체학생_통합_top{TOP_K}.csv")
+    
+    try:
+        final_df.to_csv(out_csv, index=False, encoding="utf-8-sig")
+        print(f"✅ 추천 결과 {len(final_df)} 건을 성공적으로 저장했습니다.")
+        print(f"   💾 저장 위치: {out_csv}")
+    except Exception as e:
+        print(f"❌ 치명적 오류: 최종 CSV 파일을 저장하는 데 실패했습니다.")
+        print(f"   오류 내용: {e}")
+        
+else:
+    print("⚠️ 최종 결과 없음: 모든 학생에 대한 추천 결과가 생성되지 않았습니다.")
+
+print("\n--- [4/4] 모든 프로세스 종료 ---")

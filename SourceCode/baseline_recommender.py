@@ -1,29 +1,11 @@
-# -*- coding: utf-8 -*-
-"""
-Baseline recommender: recommend programs to a student based on *lacking* (low) competencies.
-
-How it works (simple & explainable):
-1) Build each student's current competency profile by summing competencies from already *completed(이수)* programs.
-2) Compute "need weights" for each competency — the lower the student's level on a competency, the higher its weight.
-   - Option A (default): data-driven weights = (mean_of_student_levels - level). Below-mean comps get positive weight.
-   - Option B: goal-driven gaps      = max(0, target_per_competency - level). Set `target_per_comp` if you prefer.
-3) Score every candidate program = Σ (program_contribution_on_comp * need_weight_for_that_comp).
-4) Exclude programs the student already completed. Return Top-K with transparent per-comp contribution & total score.
-
-Expected inputs (CSV or DataFrame):
-- programs_df: one row per program *offering* (카탈로그). Must include program identifier and competency gain columns.
-- history_df : one row per program the student has (미)이수 기록. Must include the same competency columns + 학생ID + 이수여부.
-
-Column auto-detection:
-- Competency columns are detected by columns whose name starts with '핵심' (e.g., '핵심역량A', '핵심C', '핵심□'…).
-- Program id is detected by the first column whose name contains '프로그램'.
-- Student id column is detected by any of ['학생ID','학번','이수자ID'] (first match is used).
-- Completion flag column is detected by any of ['이수여부','이수', '수료여부'] with values containing '이수'.
-
-You can override all of these via function parameters.
-
-Author: ChatGPT (baseline for quick start)
-"""
+# =================================================================
+# baseline_recommender.py : 부족 역량 기반 추천 알고리즘
+# =================================================================
+# 역할:
+# 1. 특정 학생의 현재 역량 프로필(점수) 계산
+# 2. '평균 대비'와 '목표 대비' 두 방식으로 부족 역량 가중치 산출
+# 3. 각 프로그램의 점수를 계산하고 Top-K 추천 목록 생성
+# ---------------------------------------------------------------
 
 from __future__ import annotations
 import pandas as pd
@@ -100,70 +82,70 @@ def build_student_profile(history_df: pd.DataFrame,
     profile = df_s[competency_cols].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=0)
     return profile
 
-def score_programs_for_student(programs_df: pd.DataFrame,
-                               history_df: pd.DataFrame,
-                               student_id: str,
-                               top_k: int = 20,
-                               use_target_gap: bool = False,
-                               target_per_comp: float = 5.0,
-                               program_id_col: Optional[str]=None,
-                               student_id_col: Optional[str]=None,
-                               completion_col: Optional[str]=None,
-                               competency_cols: Optional[List[str]]=None
-                              ) -> pd.DataFrame:
+def generate_recommendations_for_student(programs_df: pd.DataFrame,
+                                         history_df: pd.DataFrame,
+                                         student_id: str,
+                                         top_k: int = 20,
+                                         target_per_comp: float = 5.0,
+                                         program_id_col: Optional[str] = None,
+                                         student_id_col: Optional[str] = None,
+                                         completion_col: Optional[str] = None,
+                                         competency_cols: Optional[List[str]] = None
+                                        ) -> pd.DataFrame:
     """
-    Return a scoring table with recommended programs for the student.
-    Columns:
-      - <program_id_col>, 'score', and per-competency contributions (need_weight * program_contrib)
+    [수정된 함수] 학생 한 명에 대해 '평균기반'과 '목표기반' 추천을 모두 생성하고,
+    두 결과를 합쳐서 하나의 DataFrame으로 반환합니다.
     """
     program_id_col, _, _, comp_cols_prog = _detect_columns(programs_df, program_id_col, None, None, competency_cols)
     _, student_id_col, completion_col, comp_cols_hist = _detect_columns(history_df, None, student_id_col, completion_col, competency_cols)
 
-    # Align competency column names (intersection)
     competency_cols = [c for c in comp_cols_prog if c in set(comp_cols_hist)]
-    if len(competency_cols) == 0:
+    if not competency_cols:
         raise ValueError("프로그램과 이력 데이터의 '핵심' 컬럼 교집합이 없습니다. 컬럼명을 확인하세요.")
 
-    # Current student profile & need weights
+    # 1. 학생 현재 역량 프로필 생성
     levels = build_student_profile(history_df, student_id, student_id_col, completion_col, competency_cols)
-    if use_target_gap:
-        need_w = _need_weights_from_targets(levels, target_per_comp)
-    else:
-        need_w = _need_weights_from_mean(levels)
-
-    # Programs already completed -> exclude
+    
+    # 2. 두 가지 방식의 '부족 역량 가중치' 계산
+    need_w_mean = _need_weights_from_mean(levels)
+    need_w_target = _need_weights_from_targets(levels, target_per_comp)
+    
+    # 3. 이수한 프로그램 목록 제외 처리
     taken_prog_ids = set()
     if program_id_col and student_id_col:
-        df_s = history_df[history_df[student_id_col].astype(str)==str(student_id)]
+        df_s = history_df[history_df[student_id_col].astype(str) == str(student_id)]
         if completion_col in df_s.columns:
             mask_completed = df_s[completion_col].astype(str).str.contains('이수', na=False)
             taken_prog_ids = set(df_s.loc[mask_completed, program_id_col].astype(str).tolist())
 
-    # Score each program
     cand = programs_df.copy()
     if program_id_col is None:
         raise ValueError("프로그램 식별 컬럼을 찾지 못했습니다. program_id_col 파라미터로 지정해주세요.")
-
-    # Clean competency numbers
+    
+    cand = cand[~cand[program_id_col].astype(str).isin(taken_prog_ids)]
     cand_comp = cand[competency_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
 
-    # Per-competency contributions = program_contrib * need_weight
-    contrib = cand_comp.mul(need_w, axis=1)
-    score = contrib.sum(axis=1)
+    all_recs = []
+    # 4. 각 방식별로 점수 계산 및 결과 생성
+    for method, weights in [('평균기반', need_w_mean), ('목표기반', need_w_target)]:
+        contrib = cand_comp.mul(weights, axis=1)
+        score = contrib.sum(axis=1)
 
-    out = cand[[program_id_col]].copy()
-    out['score'] = score
-    # Add per-competency pieces for transparency
-    for c in competency_cols:
-        out[f'contrib::{c}'] = contrib[c]
+        out = cand[[program_id_col]].copy()
+        out['추천방식'] = method
+        out['총점'] = score
+        
+        # 투명성을 위해 각 역량별 기여 점수 추가
+        for c in competency_cols:
+            out[f'기여점수::{c}'] = contrib[c]
+        
+        # 점수 높은 순으로 정렬 후 Top-K 선택
+        recs = out.sort_values('총점', ascending=False).head(top_k).reset_index(drop=True)
+        all_recs.append(recs)
 
-    # Drop already completed programs
-    if taken_prog_ids:
-        out = out[~out[program_id_col].astype(str).isin(taken_prog_ids)]
+    # 5. 두 방식의 추천 결과를 하나로 합쳐서 반환
+    return pd.concat(all_recs, ignore_index=True)
 
-    # Rank & return top_k
-    out = out.sort_values('score', ascending=False).head(top_k).reset_index(drop=True)
-    return out
 
 if __name__ == "__main__":
     # --- Minimal CLI example (edit paths) ---
